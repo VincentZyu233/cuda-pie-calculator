@@ -1,0 +1,98 @@
+name: Build and publish preview
+
+on:
+  push:
+    branches:
+      - main
+      - master
+
+permissions:
+  contents: write
+
+concurrency:
+  group: preview-release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-22.04
+            archive: cuda-pie-calculator-linux-amd64.tar.gz
+          - name: windows-amd64
+            runner: windows-2022
+            archive: cuda-pie-calculator-windows-amd64.zip
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install CUDA toolkit
+        uses: Jimver/cuda-toolkit@v0.2.21
+        with:
+          cuda: 12.4.1
+          method: network
+
+      - name: Configure and build on Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+          tar -C build/bin -czf ${{ matrix.archive }} cuda-pie-calculator
+
+      - name: Configure and build on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --parallel
+          Compress-Archive -Path build/bin/Release/cuda-pie-calculator.exe -DestinationPath ${{ matrix.archive }}
+
+      - name: Upload release asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish-preview:
+    name: Publish single preview release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Delete existing releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name' > previous-tags.txt
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            gh release delete "$tag" --yes --cleanup-tag
+          done < previous-tags.txt
+
+      - name: Create preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA:0:7}"
+          tag="preview-${GITHUB_RUN_ID}-${short_sha}"
+          gh release create "$tag" release-assets/* \
+            --prerelease \
+            --title "Preview ${short_sha}" \
+            --notes "Automated CUDA build for commit ${GITHUB_SHA}."
