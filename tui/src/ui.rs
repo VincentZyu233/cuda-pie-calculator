@@ -169,7 +169,7 @@ fn render_progress(frame: &mut Frame, area: Rect, app: &App) {
             format!(" 吞吐：{}", format::format_rate(app.job.samples_per_second)),
             Style::default().fg(Color::Cyan),
         )))
-        .data(&app.throughput)
+        .data(app.throughput.as_slice())
         .max(max_rate);
     frame.render_widget(sparkline, rows[2]);
 }
@@ -278,7 +278,7 @@ fn render_gpu(frame: &mut Frame, area: Rect, app: &App) {
     };
     let gauge = Gauge::default()
         .gauge_style(Style::default().fg(Color::Magenta))
-        .percent(value)
+        .percent(value as u16)
         .label(Span::styled(label, Style::default().fg(Color::White)));
     frame.render_widget(gauge, area);
 }

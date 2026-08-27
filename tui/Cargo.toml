@@ -8,6 +8,6 @@ name = "cuda-pie-calculator"
 path = "src/main.rs"
 
 [dependencies]
-ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui = { version = "0.30", features = ["crossterm"] }
 libloading = "0.8"
 unicode-width = "0.2"

@@ -4,15 +4,15 @@ mod format;
 mod ui;
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::{init, restore, DefaultTerminal};
+use ratatui::{try_init, try_restore, DefaultTerminal};
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = ffi::find_engine_library().ok_or("找不到 cuda_pie_engine 动态库")?;
     let engine = ffi::Engine::load(&path)?;
-    let mut terminal = init()?;
+    let mut terminal = try_init()?;
     let result = run(&mut terminal, engine);
-    restore()?;
+    try_restore()?;
     result
 }
 
