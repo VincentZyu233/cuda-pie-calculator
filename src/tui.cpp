@@ -5,12 +5,16 @@
 #include <algorithm>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -39,6 +43,8 @@ enum class Key {
     DecreasePrecision,
     ScrollUp,
     ScrollDown,
+    PreviousDevice,
+    NextDevice,
 };
 
 struct TerminalSize {
@@ -54,27 +60,27 @@ public:
         output_ = GetStdHandle(STD_OUTPUT_HANDLE);
         if (input_ == INVALID_HANDLE_VALUE || output_ == INVALID_HANDLE_VALUE ||
             GetConsoleMode(input_, &oldInputMode_) == 0 || GetConsoleMode(output_, &oldOutputMode_) == 0) {
-            throw std::runtime_error("A Windows console is required to run the TUI.");
+            throw std::runtime_error("运行 TUI 需要 Windows 控制台。");
         }
         const DWORD newInputMode = (oldInputMode_ | ENABLE_WINDOW_INPUT) & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
         const DWORD newOutputMode = oldOutputMode_ | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
         if (SetConsoleMode(input_, newInputMode) == 0 || SetConsoleMode(output_, newOutputMode) == 0) {
-            throw std::runtime_error("Windows 10/11 virtual terminal support could not be enabled.");
+            throw std::runtime_error("无法启用 Windows 10/11 的虚拟终端支持。");
         }
         SetConsoleOutputCP(CP_UTF8);
 #else
         if (isatty(STDIN_FILENO) == 0 || isatty(STDOUT_FILENO) == 0) {
-            throw std::runtime_error("An interactive terminal is required to run the TUI.");
+            throw std::runtime_error("运行 TUI 需要交互式终端。");
         }
         if (tcgetattr(STDIN_FILENO, &oldAttributes_) != 0) {
-            throw std::runtime_error("Unable to read terminal settings.");
+            throw std::runtime_error("无法读取终端设置。");
         }
         termios raw = oldAttributes_;
         raw.c_lflag &= static_cast<tcflag_t>(~(ICANON | ECHO));
         raw.c_cc[VMIN] = 0;
         raw.c_cc[VTIME] = 0;
         if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) {
-            throw std::runtime_error("Unable to enable terminal raw input mode.");
+            throw std::runtime_error("无法启用终端原始输入模式。");
         }
         oldInputFlags_ = fcntl(STDIN_FILENO, F_GETFL, 0);
         if (oldInputFlags_ >= 0) {
@@ -175,6 +181,8 @@ private:
             case '-': case '_': return Key::DecreasePrecision;
             case 'k': case 'K': return Key::ScrollUp;
             case 'j': case 'J': return Key::ScrollDown;
+            case '[': return Key::PreviousDevice;
+            case ']': return Key::NextDevice;
             default: return Key::None;
         }
     }
@@ -191,22 +199,90 @@ private:
 #endif
 };
 
-std::string crop(std::string value, std::size_t width) {
-    if (value.size() <= width) {
-        return value;
+struct Utf8Unit {
+    std::size_t bytes = 1;
+    char32_t codePoint = 0;
+};
+
+bool isContinuationByte(unsigned char value) {
+    return (value & 0xc0U) == 0x80U;
+}
+
+Utf8Unit readUtf8Unit(std::string_view text, std::size_t offset) {
+    const unsigned char first = static_cast<unsigned char>(text[offset]);
+    if (first < 0x80U) {
+        return {1, first};
     }
-    if (width <= 3) {
-        return value.substr(0, width);
+    const auto continuation = [&](std::size_t index) {
+        return index < text.size() && isContinuationByte(static_cast<unsigned char>(text[index]));
+    };
+    if ((first & 0xe0U) == 0xc0U && continuation(offset + 1)) {
+        return {2, static_cast<char32_t>(((first & 0x1fU) << 6U) | (static_cast<unsigned char>(text[offset + 1]) & 0x3fU))};
     }
-    value.resize(width - 3);
-    return value + "...";
+    if ((first & 0xf0U) == 0xe0U && continuation(offset + 1) && continuation(offset + 2)) {
+        return {3, static_cast<char32_t>(((first & 0x0fU) << 12U) |
+                                          ((static_cast<unsigned char>(text[offset + 1]) & 0x3fU) << 6U) |
+                                          (static_cast<unsigned char>(text[offset + 2]) & 0x3fU))};
+    }
+    if ((first & 0xf8U) == 0xf0U && continuation(offset + 1) && continuation(offset + 2) && continuation(offset + 3)) {
+        return {4, static_cast<char32_t>(((first & 0x07U) << 18U) |
+                                          ((static_cast<unsigned char>(text[offset + 1]) & 0x3fU) << 12U) |
+                                          ((static_cast<unsigned char>(text[offset + 2]) & 0x3fU) << 6U) |
+                                          (static_cast<unsigned char>(text[offset + 3]) & 0x3fU))};
+    }
+    return {1, first};
+}
+
+std::size_t displayCellWidth(char32_t codePoint) {
+    if (codePoint == 0 || (codePoint >= 0x300U && codePoint <= 0x36fU)) {
+        return 0;
+    }
+    if ((codePoint >= 0x1100U && codePoint <= 0x115fU) ||
+        (codePoint >= 0x2e80U && codePoint <= 0xa4cfU) ||
+        (codePoint >= 0xac00U && codePoint <= 0xd7a3U) ||
+        (codePoint >= 0xf900U && codePoint <= 0xfaffU) ||
+        (codePoint >= 0xfe10U && codePoint <= 0xfe6fU) ||
+        (codePoint >= 0xff00U && codePoint <= 0xff60U) ||
+        (codePoint >= 0xffe0U && codePoint <= 0xffe6U) ||
+        (codePoint >= 0x1f300U && codePoint <= 0x1faffU) ||
+        (codePoint >= 0x20000U && codePoint <= 0x3fffdU)) {
+        return 2;
+    }
+    return 1;
+}
+
+std::size_t displayWidth(std::string_view text) {
+    std::size_t width = 0;
+    for (std::size_t offset = 0; offset < text.size();) {
+        const Utf8Unit unit = readUtf8Unit(text, offset);
+        width += displayCellWidth(unit.codePoint);
+        offset += unit.bytes;
+    }
+    return width;
+}
+
+std::string crop(std::string_view text, std::size_t width) {
+    std::string visible;
+    std::size_t used = 0;
+    for (std::size_t offset = 0; offset < text.size();) {
+        const Utf8Unit unit = readUtf8Unit(text, offset);
+        const std::size_t unitWidth = displayCellWidth(unit.codePoint);
+        if (used + unitWidth > width) {
+            break;
+        }
+        visible.append(text.substr(offset, unit.bytes));
+        used += unitWidth;
+        offset += unit.bytes;
+    }
+    return visible;
 }
 
 void appendLine(std::ostringstream& output, const std::string& text, std::size_t width, bool advance = true) {
     const std::string visible = crop(text, width);
     output << visible;
-    if (visible.size() < width) {
-        output << std::string(width - visible.size(), ' ');
+    const std::size_t visibleWidth = displayWidth(visible);
+    if (visibleWidth < width) {
+        output << std::string(width - visibleWidth, ' ');
     }
     output << "\x1b[K";
     if (advance) {
@@ -228,24 +304,12 @@ bool jobIsActive(JobState state) {
     return state == JobState::Preparing || state == JobState::Running || state == JobState::Paused || state == JobState::Cancelling;
 }
 
-std::string formatSampleCount(std::uint64_t samples) {
-    std::ostringstream output;
-    if (samples >= 1'000'000'000ULL) {
-        output << std::fixed << std::setprecision(2) << static_cast<double>(samples) / 1'000'000'000.0 << " B";
-    } else if (samples >= 1'000'000ULL) {
-        output << std::fixed << std::setprecision(1) << static_cast<double>(samples) / 1'000'000.0 << " M";
-    } else {
-        output << samples;
-    }
-    return output.str();
-}
-
 std::vector<std::string> resultLines(const std::string& result, std::size_t width, CalculationMode selectedMode) {
     std::vector<std::string> lines;
     if (result.empty()) {
         lines.emplace_back(selectedMode == CalculationMode::MonteCarlo
-                               ? "Waiting for CUDA Monte Carlo samples. No CPU calculation path exists."
-                               : "Waiting for a CUDA exact result. No CPU calculation path exists.");
+                               ? "等待当前 CUDA GPU 的蒙特卡洛计算结果。程序没有 CPU 计算路径。"
+                               : "等待当前 CUDA GPU 的精确计算结果。程序没有 CPU 计算路径。");
         return lines;
     }
 
@@ -257,8 +321,22 @@ std::vector<std::string> resultLines(const std::string& result, std::size_t widt
         if (segment.empty()) {
             lines.emplace_back();
         } else {
-            for (std::size_t offset = 0; offset < segment.size(); offset += width) {
-                lines.push_back(segment.substr(offset, width));
+            std::string line;
+            std::size_t lineWidth = 0;
+            for (std::size_t offset = 0; offset < segment.size();) {
+                const Utf8Unit unit = readUtf8Unit(segment, offset);
+                const std::size_t unitWidth = displayCellWidth(unit.codePoint);
+                if (!line.empty() && lineWidth + unitWidth > width) {
+                    lines.push_back(std::move(line));
+                    line.clear();
+                    lineWidth = 0;
+                }
+                line.append(segment, offset, unit.bytes);
+                lineWidth += unitWidth;
+                offset += unit.bytes;
+            }
+            if (!line.empty()) {
+                lines.push_back(std::move(line));
             }
         }
         if (lineBreak == std::string::npos) {
@@ -271,30 +349,121 @@ std::vector<std::string> resultLines(const std::string& result, std::size_t widt
 
 std::string cpuLine(const ResourceStats& stats) {
     std::ostringstream output;
-    output << "CPU: ";
+    output << "CPU：";
     if (stats.cpuAvailable) {
         output << std::fixed << std::setprecision(1) << stats.cpuPercent << '%';
     } else {
-        output << "sampling";
+        output << "采样中";
     }
-    output << "   RAM: " << formatBytes(stats.memoryUsedBytes) << " / " << formatBytes(stats.memoryTotalBytes);
+    output << "   内存：" << formatBytes(stats.memoryUsedBytes) << " / " << formatBytes(stats.memoryTotalBytes);
     return output.str();
 }
 
 std::string gpuLoadLine(const ResourceStats& stats) {
     if (!stats.gpuDetailsAvailable) {
-        return "GPU load: NVML metrics unavailable";
+        return "当前 GPU 负载：NVML 指标不可用";
     }
     std::ostringstream output;
-    output << "GPU load: " << stats.gpuUtilizationPercent << "%   VRAM: "
+    output << "当前 GPU 负载：" << stats.gpuUtilizationPercent << "%   显存："
            << formatBytes(stats.gpuMemoryUsedBytes) << " / " << formatBytes(stats.gpuMemoryTotalBytes)
-           << "   Temp: " << stats.gpuTemperatureCelsius << " C";
+           << "   温度：" << stats.gpuTemperatureCelsius << " C";
     return output.str();
+}
+
+std::string formatSampleCount(std::uint64_t samples) {
+    std::ostringstream output;
+    if (samples >= 100'000'000ULL) {
+        output << std::fixed << std::setprecision(1) << static_cast<double>(samples) / 100'000'000.0 << " 亿";
+    } else if (samples >= 10'000ULL) {
+        output << std::fixed << std::setprecision(1) << static_cast<double>(samples) / 10'000.0 << " 万";
+    } else {
+        output << samples;
+    }
+    return output.str();
+}
+
+std::string formatSampleRate(double samplesPerSecond) {
+    if (samplesPerSecond <= 0.0) {
+        return "暂无";
+    }
+    return formatSampleCount(static_cast<std::uint64_t>(samplesPerSecond)) + "样本/秒";
+}
+
+std::string formatDigitRate(unsigned digits, double milliseconds) {
+    if (milliseconds <= 0.0) {
+        return "暂无";
+    }
+    const double digitsPerSecond = static_cast<double>(digits) * 1000.0 / milliseconds;
+    std::ostringstream output;
+    if (digitsPerSecond >= 10'000.0) {
+        output << std::fixed << std::setprecision(1) << digitsPerSecond / 10'000.0 << "万位/秒";
+    } else {
+        output << std::fixed << std::setprecision(1) << digitsPerSecond << "位/秒";
+    }
+    return output.str();
+}
+
+std::string formatTheoreticalBandwidth(const GpuInfo& gpu) {
+    if (gpu.memoryClockKHz <= 0 || gpu.memoryBusWidthBits <= 0) {
+        return "未知";
+    }
+    const double gigabytesPerSecond = static_cast<double>(gpu.memoryClockKHz) * 1000.0 *
+                                     static_cast<double>(gpu.memoryBusWidthBits) / 8.0 * 2.0 / 1'000'000'000.0;
+    std::ostringstream output;
+    output << std::fixed << std::setprecision(1) << gigabytesPerSecond << " GB/s";
+    return output.str();
+}
+
+std::string deviceTaskLine(const JobSnapshot& job) {
+    std::ostringstream output;
+    output << "    任务：" << stateLabel(job.state);
+    if (job.state == JobState::GpuUnavailable) {
+        return output.str();
+    }
+    if (job.state == JobState::Idle && job.result.empty()) {
+        output << " | 尚未计算";
+        return output.str();
+    }
+
+    if (job.mode == CalculationMode::MonteCarlo) {
+        if (job.sampleTarget > 0) {
+            output << " | 蒙特卡洛 " << formatSampleCount(job.sampleTarget) << "样本";
+        }
+        if (job.samplesPerSecond > 0.0) {
+            output << " | 吞吐：" << formatSampleRate(job.samplesPerSecond);
+        }
+        if (job.samplesCompleted > 0) {
+            output << " | Pi约 " << std::fixed << std::setprecision(8) << job.monteCarloEstimate;
+        }
+    } else {
+        output << " | 精确 " << job.requestedDigits << " 位";
+        if (job.gpuMilliseconds > 0.0) {
+            output << " | 用时：" << std::fixed << std::setprecision(2) << job.gpuMilliseconds << " ms"
+                   << " | 吞吐：" << formatDigitRate(job.requestedDigits, job.gpuMilliseconds);
+        }
+        if (!job.result.empty()) {
+            output << " | Pi=" << crop(job.result, 18);
+        }
+    }
+    return output.str();
+}
+
+std::size_t deviceWindowStart(std::size_t deviceCount, std::size_t selectedSlot, std::size_t visibleSlots) {
+    if (deviceCount <= visibleSlots) {
+        return 0;
+    }
+    const std::size_t before = visibleSlots / 2;
+    std::size_t first = selectedSlot > before ? selectedSlot - before : 0;
+    if (first + visibleSlots > deviceCount) {
+        first = deviceCount - visibleSlots;
+    }
+    return first;
 }
 
 void render(
     const TerminalSize& terminal,
-    const GpuInfo& gpu,
+    const std::vector<DeviceSnapshot>& devices,
+    std::size_t selectedDeviceSlot,
     const JobSnapshot& job,
     const ResourceStats& resources,
     CalculationMode selectedMode,
@@ -303,35 +472,61 @@ void render(
     std::size_t& scrollOffset) {
     const std::size_t width = terminal.columns;
     const std::size_t bottomRows = 5;
-    const std::size_t middleRows = std::max<std::size_t>(1, terminal.rows - bottomRows - 4);
+    const std::size_t baseHeaderRows = 4;
+    const std::size_t availableDeviceRows = terminal.rows > bottomRows + baseHeaderRows + 1
+                                                ? terminal.rows - bottomRows - baseHeaderRows - 1
+                                                : 2;
+    const std::size_t visibleDeviceSlots = std::min(devices.size(), std::max<std::size_t>(1, availableDeviceRows / 2));
+    const std::size_t firstDeviceSlot = deviceWindowStart(devices.size(), selectedDeviceSlot, visibleDeviceSlots);
+    const std::size_t headerRows = baseHeaderRows + visibleDeviceSlots * 2;
+    const std::size_t middleRows = std::max<std::size_t>(1, terminal.rows - bottomRows - headerRows);
     const auto lines = resultLines(job.result, width - 2, selectedMode);
     const std::size_t maxScroll = lines.size() > middleRows ? lines.size() - middleRows : 0;
     scrollOffset = std::min(scrollOffset, maxScroll);
 
     std::ostringstream output;
     output << "\x1b[H\x1b[1;36m";
-    appendLine(output, "CUDA Pi Calculator", width);
+    appendLine(output, "CUDA 圆周率计算器（仅使用 CUDA，不使用 CPU 回退）", width);
     output << "\x1b[0m";
-    if (gpu.available) {
-        std::ostringstream gpuLine;
-        gpuLine << "CUDA GPU: " << gpu.name << "  CC " << gpu.computeMajor << '.' << gpu.computeMinor
-                << "  VRAM " << formatBytes(gpu.totalMemoryBytes);
-        appendLine(output, gpuLine.str(), width);
-    } else {
-        appendLine(output, gpu.reason, width);
+
+    std::ostringstream deviceHeading;
+    deviceHeading << "CUDA 设备（共 " << devices.size() << " 块，显示 " << (firstDeviceSlot + 1) << '-'
+                  << (firstDeviceSlot + visibleDeviceSlots) << "；按 [ / ] 切换，运行中不可切换）";
+    appendLine(output, deviceHeading.str(), width);
+    for (std::size_t slot = firstDeviceSlot; slot < firstDeviceSlot + visibleDeviceSlots; ++slot) {
+        const DeviceSnapshot& device = devices[slot];
+        const GpuInfo& gpu = device.gpu;
+        std::ostringstream hardware;
+        hardware << (slot == selectedDeviceSlot ? "> " : "  ") << '[';
+        if (gpu.deviceIndex >= 0) {
+            hardware << gpu.deviceIndex;
+        } else {
+            hardware << '-';
+        }
+        hardware << "] " << gpu.name;
+        if (gpu.available) {
+            hardware << " | 计算能力 CC " << gpu.computeMajor << '.' << gpu.computeMinor
+                     << " | " << gpu.multiprocessorCount << " SM"
+                     << " | 显存 " << formatBytes(gpu.totalMemoryBytes)
+                     << " | 理论带宽 " << formatTheoreticalBandwidth(gpu);
+        } else {
+            hardware << " | " << gpu.reason;
+        }
+        appendLine(output, hardware.str(), width);
+        appendLine(output, deviceTaskLine(device.job), width);
     }
 
     std::ostringstream status;
-    status << "State: " << stateLabel(job.state) << "   Mode: " << modeLabel(selectedMode) << "   ";
+    status << "状态：" << stateLabel(job.state) << "   模式：" << modeLabel(selectedMode) << "   ";
     if (selectedMode == CalculationMode::MonteCarlo) {
-        status << "Target: " << formatSampleCount(selectedSamples) << " samples   ";
+        status << "目标：" << formatSampleCount(selectedSamples) << "样本   ";
     } else {
-        status << "Precision: " << selectedDigits << " digits   ";
+        status << "目标：" << selectedDigits << " 位   ";
     }
     status << progressBar(job.completedSteps, job.totalSteps, width / 3);
     appendLine(output, status.str(), width);
     const CalculationMode outputMode = job.result.empty() ? selectedMode : job.mode;
-    appendLine(output, outputMode == CalculationMode::MonteCarlo ? "Monte Carlo output" : "Exact Pi output", width);
+    appendLine(output, outputMode == CalculationMode::MonteCarlo ? "计算输出：蒙特卡洛估计" : "计算输出：Pi 精确位数", width);
 
     for (std::size_t row = 0; row < middleRows; ++row) {
         const std::size_t line = scrollOffset + row;
@@ -340,20 +535,21 @@ void render(
 
     std::string phase = job.phase.empty() ? job.message : job.phase;
     if (job.mode == CalculationMode::MonteCarlo && job.samplesCompleted > 0) {
-        phase += "   Samples: " + formatSampleCount(job.samplesCompleted) + " / " + formatSampleCount(job.sampleTarget) +
-                 "   Hits: " + std::to_string(job.hitsInsideCircle);
+        phase += "   样本：" + formatSampleCount(job.samplesCompleted) + " / " + formatSampleCount(job.sampleTarget) +
+                 "   圆内命中：" + std::to_string(job.hitsInsideCircle);
     }
     appendLine(output, phase, width);
     appendLine(output, cpuLine(resources), width);
     appendLine(output, gpuLoadLine(resources), width);
-    if (gpu.available) {
-        appendLine(output, "[s] start  [m] mode  [p] pause/resume  [c] cancel  [+/-] target  [j/k or arrows] scroll  [q] quit", width);
+    const GpuInfo& selectedGpu = devices[selectedDeviceSlot].gpu;
+    if (selectedGpu.available) {
+        appendLine(output, "按键：s 开始  m 模式  [ / ] 显卡  p 暂停  c 取消  +/- 目标  j/k 滚动  q 退出", width);
     } else {
-        appendLine(output, "[s] disabled: no CUDA GPU   [q] quit", width);
+        appendLine(output, "当前 GPU 不可用：s 已禁用，q 退出", width);
     }
     if (job.gpuMilliseconds > 0.0) {
         std::ostringstream timing;
-        timing << "CUDA kernel time: " << std::fixed << std::setprecision(2) << job.gpuMilliseconds << " ms  " << job.message;
+        timing << "CUDA 计时：" << std::fixed << std::setprecision(2) << job.gpuMilliseconds << " ms   " << job.message;
         appendLine(output, timing.str(), width, false);
     } else {
         appendLine(output, job.message, width, false);
@@ -366,9 +562,10 @@ void render(
 
 int TerminalUi::run(PiEngine& engine) {
     TerminalSession terminal;
-    ResourceMonitor monitor(engine.gpu());
+    std::size_t monitoredDeviceSlot = engine.selectedDeviceSlot();
+    auto monitor = std::make_unique<ResourceMonitor>(engine.selectedGpu());
     CalculationMode selectedMode = CalculationMode::ExactDigits;
-    unsigned selectedDigits = 1000;
+    unsigned selectedDigits = kDefaultDigits;
     std::uint64_t selectedSamples = 100'000'000ULL;
     std::size_t scrollOffset = 0;
     bool running = true;
@@ -426,6 +623,21 @@ int TerminalUi::run(PiEngine& engine) {
             case Key::ScrollDown:
                 ++scrollOffset;
                 break;
+            case Key::PreviousDevice:
+            case Key::NextDevice: {
+                const JobSnapshot currentJob = engine.snapshot();
+                const std::vector<DeviceSnapshot> devices = engine.devices();
+                if (!jobIsActive(currentJob.state) && devices.size() > 1) {
+                    const std::size_t currentSlot = engine.selectedDeviceSlot();
+                    const std::size_t nextSlot = key == Key::PreviousDevice
+                                                     ? (currentSlot == 0 ? devices.size() - 1 : currentSlot - 1)
+                                                     : (currentSlot + 1) % devices.size();
+                    if (engine.selectDevice(nextSlot)) {
+                        scrollOffset = 0;
+                    }
+                }
+                break;
+            }
             case Key::Quit:
                 engine.stop();
                 running = false;
@@ -434,7 +646,22 @@ int TerminalUi::run(PiEngine& engine) {
                 break;
         }
 
-        render(terminal.size(), engine.gpu(), engine.snapshot(), monitor.sample(), selectedMode, selectedDigits, selectedSamples, scrollOffset);
+        const std::size_t selectedDeviceSlot = engine.selectedDeviceSlot();
+        const std::vector<DeviceSnapshot> devices = engine.devices();
+        if (selectedDeviceSlot != monitoredDeviceSlot) {
+            monitor = std::make_unique<ResourceMonitor>(engine.selectedGpu());
+            monitoredDeviceSlot = selectedDeviceSlot;
+        }
+        render(
+            terminal.size(),
+            devices,
+            selectedDeviceSlot,
+            devices[selectedDeviceSlot].job,
+            monitor->sample(),
+            selectedMode,
+            selectedDigits,
+            selectedSamples,
+            scrollOffset);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return 0;

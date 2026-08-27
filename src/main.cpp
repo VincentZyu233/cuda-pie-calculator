@@ -10,7 +10,7 @@ int main() {
         pie::TerminalUi ui;
         return ui.run(engine);
     } catch (const std::exception& error) {
-        std::cerr << "cuda-pie-calculator: " << error.what() << '\n';
+        std::cerr << "CUDA 圆周率计算器：" << error.what() << '\n';
         return 1;
     }
 }

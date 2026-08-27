@@ -24,7 +24,7 @@ constexpr std::uint64_t kMonteCarloBatchSamples = 8ULL * 1024ULL * 1024ULL;
 
 class Cancelled final : public std::exception {
 public:
-    const char* what() const noexcept override { return "cancelled"; }
+    const char* what() const noexcept override { return "任务已取消"; }
 };
 
 void checkCuda(cudaError_t error, const char* action) {
@@ -37,7 +37,7 @@ template <typename T>
 class DeviceBuffer {
 public:
     explicit DeviceBuffer(std::size_t count) {
-        checkCuda(cudaMalloc(&data_, count * sizeof(T)), "CUDA memory allocation failed");
+        checkCuda(cudaMalloc(&data_, count * sizeof(T)), "CUDA 显存分配失败");
     }
 
     ~DeviceBuffer() {
@@ -252,31 +252,30 @@ std::string formatMonteCarloResult(
     double confidence95,
     double samplesPerSecond) {
     std::ostringstream output;
-    output << "CUDA Monte Carlo estimate\n"
-           << "pi ~= " << std::fixed << std::setprecision(12) << estimate << '\n'
-           << "95% confidence interval: +/- " << std::setprecision(12) << confidence95 << '\n'
-           << "samples: " << samples << "   hits: " << hits << '\n'
-           << "throughput: " << std::setprecision(1) << samplesPerSecond << " samples/s";
+    output << "CUDA 蒙特卡洛估计结果\n"
+           << "Pi 约为 " << std::fixed << std::setprecision(12) << estimate << '\n'
+           << "95% 置信区间：+/- " << std::setprecision(12) << confidence95 << '\n'
+           << "样本数：" << samples << "   圆内命中：" << hits << '\n'
+           << "吞吐量：" << std::setprecision(1) << samplesPerSecond << " 样本/秒";
     return output.str();
 }
 
-GpuInfo probeGpu() {
-    GpuInfo info;
+bool jobIsActive(JobState state) {
+    return state == JobState::Preparing || state == JobState::Running || state == JobState::Paused || state == JobState::Cancelling;
+}
+
+std::vector<GpuInfo> probeGpus() {
+    std::vector<GpuInfo> devices;
     int deviceCount = 0;
     const cudaError_t countResult = cudaGetDeviceCount(&deviceCount);
     if (countResult != cudaSuccess || deviceCount <= 0) {
-        const char* detail = countResult == cudaSuccess ? "no CUDA devices were returned" : cudaGetErrorString(countResult);
-        info.reason = std::string("GPU unavailable: ") + detail;
+        GpuInfo info;
+        const char* detail = countResult == cudaSuccess ? "CUDA 运行时未返回任何设备" : cudaGetErrorString(countResult);
+        info.name = "未发现 CUDA GPU";
+        info.reason = std::string("GPU 不可用：") + detail;
+        devices.push_back(std::move(info));
         cudaGetLastError();
-        return info;
-    }
-
-    cudaDeviceProp properties{};
-    const cudaError_t propertiesResult = cudaGetDeviceProperties(&properties, 0);
-    if (propertiesResult != cudaSuccess) {
-        info.reason = std::string("GPU unavailable: ") + cudaGetErrorString(propertiesResult);
-        cudaGetLastError();
-        return info;
+        return devices;
     }
 
     int driver = 0;
@@ -284,72 +283,123 @@ GpuInfo probeGpu() {
     cudaDriverGetVersion(&driver);
     cudaRuntimeGetVersion(&runtime);
 
-    info.available = true;
-    info.deviceIndex = 0;
-    info.name = properties.name;
-    info.totalMemoryBytes = properties.totalGlobalMem;
-    info.computeMajor = properties.major;
-    info.computeMinor = properties.minor;
-    info.driverVersion = driver;
-    info.runtimeVersion = runtime;
-    return info;
+    devices.reserve(static_cast<std::size_t>(deviceCount));
+    for (int deviceIndex = 0; deviceIndex < deviceCount; ++deviceIndex) {
+        GpuInfo info;
+        info.deviceIndex = deviceIndex;
+        info.driverVersion = driver;
+        info.runtimeVersion = runtime;
+
+        cudaDeviceProp properties{};
+        const cudaError_t propertiesResult = cudaGetDeviceProperties(&properties, deviceIndex);
+        if (propertiesResult != cudaSuccess) {
+            info.name = "CUDA 设备属性读取失败";
+            info.reason = std::string("GPU 不可用：") + cudaGetErrorString(propertiesResult);
+            cudaGetLastError();
+            devices.push_back(std::move(info));
+            continue;
+        }
+
+        info.available = true;
+        info.name = properties.name;
+        info.totalMemoryBytes = properties.totalGlobalMem;
+        info.computeMajor = properties.major;
+        info.computeMinor = properties.minor;
+        info.multiprocessorCount = properties.multiProcessorCount;
+        info.coreClockKHz = properties.clockRate;
+        info.memoryClockKHz = properties.memoryClockRate;
+        info.memoryBusWidthBits = properties.memoryBusWidth;
+        devices.push_back(std::move(info));
+    }
+    return devices;
 }
 
 }  // namespace
 
 const char* stateLabel(JobState state) {
     switch (state) {
-        case JobState::GpuUnavailable: return "GPU unavailable";
-        case JobState::Idle: return "Ready";
-        case JobState::Preparing: return "Preparing CUDA job";
-        case JobState::Running: return "Calculating on GPU";
-        case JobState::Paused: return "Paused";
-        case JobState::Cancelling: return "Stopping";
-        case JobState::Finished: return "Finished";
-        case JobState::Cancelled: return "Cancelled";
-        case JobState::Failed: return "Failed";
+        case JobState::GpuUnavailable: return "GPU 不可用";
+        case JobState::Idle: return "就绪";
+        case JobState::Preparing: return "正在准备 CUDA 任务";
+        case JobState::Running: return "正在使用 GPU 计算";
+        case JobState::Paused: return "已暂停";
+        case JobState::Cancelling: return "正在停止";
+        case JobState::Finished: return "已完成";
+        case JobState::Cancelled: return "已取消";
+        case JobState::Failed: return "失败";
     }
-    return "Unknown";
+    return "未知状态";
 }
 
 const char* modeLabel(CalculationMode mode) {
     switch (mode) {
-        case CalculationMode::ExactDigits: return "Exact digits";
-        case CalculationMode::MonteCarlo: return "Monte Carlo";
+        case CalculationMode::ExactDigits: return "精确位数";
+        case CalculationMode::MonteCarlo: return "蒙特卡洛";
     }
-    return "Unknown";
+    return "未知模式";
 }
 
-PiEngine::PiEngine() : gpu_(probeGpu()) {
-    snapshot_.state = gpu_.available ? JobState::Idle : JobState::GpuUnavailable;
-    snapshot_.message = gpu_.available ? "CUDA device ready. Press s to start." : gpu_.reason;
+PiEngine::PiEngine() : gpus_(probeGpus()) {
+    deviceSnapshots_.reserve(gpus_.size());
+    for (const GpuInfo& gpu : gpus_) {
+        JobSnapshot snapshot;
+        snapshot.state = gpu.available ? JobState::Idle : JobState::GpuUnavailable;
+        snapshot.message = gpu.available ? "CUDA 设备已就绪，按 s 开始计算。" : gpu.reason;
+        deviceSnapshots_.push_back(std::move(snapshot));
+    }
 }
 
 PiEngine::~PiEngine() {
     stop();
 }
 
-const GpuInfo& PiEngine::gpu() const noexcept {
-    return gpu_;
+std::vector<DeviceSnapshot> PiEngine::devices() const {
+    std::scoped_lock lock(snapshotMutex_);
+    std::vector<DeviceSnapshot> result;
+    result.reserve(gpus_.size());
+    for (std::size_t index = 0; index < gpus_.size(); ++index) {
+        result.push_back(DeviceSnapshot{gpus_[index], deviceSnapshots_[index]});
+    }
+    return result;
+}
+
+GpuInfo PiEngine::selectedGpu() const {
+    std::scoped_lock lock(snapshotMutex_);
+    return selectedDeviceSlot_ < gpus_.size() ? gpus_[selectedDeviceSlot_] : GpuInfo{};
+}
+
+std::size_t PiEngine::selectedDeviceSlot() const {
+    std::scoped_lock lock(snapshotMutex_);
+    return selectedDeviceSlot_;
+}
+
+bool PiEngine::selectDevice(std::size_t deviceSlot) {
+    std::scoped_lock lock(snapshotMutex_);
+    if (deviceSlot >= gpus_.size() || jobIsActive(deviceSnapshots_[selectedDeviceSlot_].state)) {
+        return false;
+    }
+    selectedDeviceSlot_ = deviceSlot;
+    return true;
 }
 
 JobSnapshot PiEngine::snapshot() const {
     std::scoped_lock lock(snapshotMutex_);
-    return snapshot_;
+    return deviceSnapshots_[selectedDeviceSlot_];
 }
 
 void PiEngine::setSnapshot(const JobSnapshot& value) {
     std::scoped_lock lock(snapshotMutex_);
-    snapshot_ = value;
+    deviceSnapshots_[selectedDeviceSlot_] = value;
 }
 
 void PiEngine::updateProgress(unsigned complete, unsigned total, const std::string& phase) {
     std::scoped_lock lock(snapshotMutex_);
-    snapshot_.completedSteps = complete;
-    snapshot_.totalSteps = total;
-    snapshot_.phase = phase;
-    if (snapshot_.state == JobState::Preparing) {
-        snapshot_.state = JobState::Running;
+    JobSnapshot& snapshot = deviceSnapshots_[selectedDeviceSlot_];
+    snapshot.completedSteps = complete;
+    snapshot.totalSteps = total;
+    snapshot.phase = phase;
+    if (snapshot.state == JobState::Preparing) {
+        snapshot.state = JobState::Running;
     }
 }
 
@@ -361,33 +411,36 @@ void PiEngine::updateMonteCarloProgress(
     double confidence95,
     double samplesPerSecond) {
     std::scoped_lock lock(snapshotMutex_);
-    snapshot_.samplesCompleted = completed;
-    snapshot_.sampleTarget = target;
-    snapshot_.hitsInsideCircle = hits;
-    snapshot_.monteCarloEstimate = estimate;
-    snapshot_.monteCarloConfidence95 = confidence95;
-    snapshot_.samplesPerSecond = samplesPerSecond;
-    snapshot_.completedSteps = static_cast<unsigned>((completed * 1000ULL) / target);
-    snapshot_.totalSteps = 1000;
-    snapshot_.phase = "CUDA Monte Carlo sampling";
-    snapshot_.result = formatMonteCarloResult(completed, hits, estimate, confidence95, samplesPerSecond);
-    if (snapshot_.state == JobState::Preparing) {
-        snapshot_.state = JobState::Running;
+    JobSnapshot& snapshot = deviceSnapshots_[selectedDeviceSlot_];
+    snapshot.samplesCompleted = completed;
+    snapshot.sampleTarget = target;
+    snapshot.hitsInsideCircle = hits;
+    snapshot.monteCarloEstimate = estimate;
+    snapshot.monteCarloConfidence95 = confidence95;
+    snapshot.samplesPerSecond = samplesPerSecond;
+    snapshot.completedSteps = static_cast<unsigned>((completed * 1000ULL) / target);
+    snapshot.totalSteps = 1000;
+    snapshot.phase = "正在使用 CUDA 进行蒙特卡洛采样";
+    snapshot.result = formatMonteCarloResult(completed, hits, estimate, confidence95, samplesPerSecond);
+    if (snapshot.state == JobState::Preparing) {
+        snapshot.state = JobState::Running;
     }
 }
 
 bool PiEngine::beginJob(const JobSnapshot& initial) {
-    if (!gpu_.available) {
+    {
         std::scoped_lock lock(snapshotMutex_);
-        snapshot_.state = JobState::GpuUnavailable;
-        snapshot_.message = gpu_.reason;
-        return false;
-    }
-    if (worker_.joinable()) {
-        const JobState current = snapshot().state;
-        if (current == JobState::Preparing || current == JobState::Running || current == JobState::Paused || current == JobState::Cancelling) {
+        if (!gpus_[selectedDeviceSlot_].available) {
+            JobSnapshot& snapshot = deviceSnapshots_[selectedDeviceSlot_];
+            snapshot.state = JobState::GpuUnavailable;
+            snapshot.message = gpus_[selectedDeviceSlot_].reason;
             return false;
         }
+        if (jobIsActive(deviceSnapshots_[selectedDeviceSlot_].state)) {
+            return false;
+        }
+    }
+    if (worker_.joinable()) {
         worker_.join();
     }
 
@@ -399,9 +452,10 @@ bool PiEngine::beginJob(const JobSnapshot& initial) {
 
 bool PiEngine::startExact(unsigned digits) {
     if (digits < kMinimumDigits || digits > kMaximumDigits) {
-        std::scoped_lock lock(snapshotMutex_);
-        snapshot_.state = JobState::Failed;
-        snapshot_.message = "Requested precision is outside the supported 10 to 10000 digit range.";
+        JobSnapshot failed = snapshot();
+        failed.state = JobState::Failed;
+        failed.message = "请求精度超出支持范围：小数点后 10 到 10000 位。";
+        setSnapshot(failed);
         return false;
     }
 
@@ -409,19 +463,20 @@ bool PiEngine::startExact(unsigned digits) {
     initial.state = JobState::Preparing;
     initial.mode = CalculationMode::ExactDigits;
     initial.requestedDigits = digits;
-    initial.message = "Allocating CUDA fixed-point buffers.";
+    initial.message = "正在分配 CUDA 定点计算缓冲区。";
     if (!beginJob(initial)) {
         return false;
     }
-    worker_ = std::thread(&PiEngine::runExact, this, digits);
+    worker_ = std::thread(&PiEngine::runExact, this, digits, selectedGpu().deviceIndex);
     return true;
 }
 
 bool PiEngine::startMonteCarlo(std::uint64_t samples) {
     if (samples < kMinimumMonteCarloSamples || samples > kMaximumMonteCarloSamples) {
-        std::scoped_lock lock(snapshotMutex_);
-        snapshot_.state = JobState::Failed;
-        snapshot_.message = "Monte Carlo sample count is outside the supported 1 million to 4 billion range.";
+        JobSnapshot failed = snapshot();
+        failed.state = JobState::Failed;
+        failed.message = "蒙特卡洛样本数超出支持范围：100 万到 40 亿。";
+        setSnapshot(failed);
         return false;
     }
 
@@ -429,11 +484,11 @@ bool PiEngine::startMonteCarlo(std::uint64_t samples) {
     initial.state = JobState::Preparing;
     initial.mode = CalculationMode::MonteCarlo;
     initial.sampleTarget = samples;
-    initial.message = "Preparing CUDA Monte Carlo sampling grid.";
+    initial.message = "正在准备 CUDA 蒙特卡洛采样网格。";
     if (!beginJob(initial)) {
         return false;
     }
-    worker_ = std::thread(&PiEngine::runMonteCarlo, this, samples);
+    worker_ = std::thread(&PiEngine::runMonteCarlo, this, samples, selectedGpu().deviceIndex);
     return true;
 }
 
@@ -442,14 +497,14 @@ void PiEngine::togglePause() {
     if (current == JobState::Running) {
         paused_.store(true);
         std::scoped_lock lock(snapshotMutex_);
-        snapshot_.state = JobState::Paused;
-        snapshot_.message = "CUDA work will pause after the current kernel.";
+        deviceSnapshots_[selectedDeviceSlot_].state = JobState::Paused;
+        deviceSnapshots_[selectedDeviceSlot_].message = "当前 CUDA 内核结束后将暂停。";
     } else if (current == JobState::Paused) {
         paused_.store(false);
         {
             std::scoped_lock lock(snapshotMutex_);
-            snapshot_.state = JobState::Running;
-            snapshot_.message = "CUDA calculation resumed.";
+            deviceSnapshots_[selectedDeviceSlot_].state = JobState::Running;
+            deviceSnapshots_[selectedDeviceSlot_].message = "已继续 CUDA 计算。";
         }
         pauseChanged_.notify_all();
     }
@@ -460,9 +515,10 @@ void PiEngine::cancel() {
     paused_.store(false);
     {
         std::scoped_lock lock(snapshotMutex_);
-        if (snapshot_.state == JobState::Preparing || snapshot_.state == JobState::Running || snapshot_.state == JobState::Paused) {
-            snapshot_.state = JobState::Cancelling;
-            snapshot_.message = "Cancelling CUDA job.";
+        JobSnapshot& snapshot = deviceSnapshots_[selectedDeviceSlot_];
+        if (snapshot.state == JobState::Preparing || snapshot.state == JobState::Running || snapshot.state == JobState::Paused) {
+            snapshot.state = JobState::Cancelling;
+            snapshot.message = "正在停止 CUDA 任务。";
         }
     }
     pauseChanged_.notify_all();
@@ -484,16 +540,16 @@ void PiEngine::waitWhilePaused() {
     pauseChanged_.wait(lock, [this] { return !paused_.load() || cancellationRequested(); });
 }
 
-void PiEngine::runExact(unsigned digits) {
+void PiEngine::runExact(unsigned digits, int cudaDeviceIndex) {
     cudaStream_t stream = nullptr;
     cudaEvent_t started = nullptr;
     cudaEvent_t finished = nullptr;
 
     try {
-        checkCuda(cudaSetDevice(gpu_.deviceIndex), "CUDA device selection failed");
-        checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "CUDA stream creation failed");
-        checkCuda(cudaEventCreate(&started), "CUDA start event creation failed");
-        checkCuda(cudaEventCreate(&finished), "CUDA finish event creation failed");
+        checkCuda(cudaSetDevice(cudaDeviceIndex), "CUDA 设备选择失败");
+        checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "CUDA 流创建失败");
+        checkCuda(cudaEventCreate(&started), "CUDA 起始事件创建失败");
+        checkCuda(cudaEventCreate(&finished), "CUDA 结束事件创建失败");
 
         const unsigned workingDigits = digits + kGuardDecimalDigits;
         const std::size_t limbs = (workingDigits + 3U) / 4U;
@@ -508,12 +564,12 @@ void PiEngine::runExact(unsigned digits) {
         DeviceBuffer<std::uint32_t> quarterPi(limbs);
         DeviceBuffer<unsigned> integerPart(1);
 
-        checkCuda(cudaEventRecord(started, stream), "CUDA start event recording failed");
+        checkCuda(cudaEventRecord(started, stream), "CUDA 起始事件记录失败");
 
         const auto calculateAtan = [&](unsigned q, DeviceBuffer<std::uint32_t>& destination, const char* phase) {
             initializeAtanKernel<<<1, 1, 0, stream>>>(term.data(), destination.data(), limbs, q);
-            checkCuda(cudaGetLastError(), "CUDA arctangent initialization failed");
-            checkCuda(cudaStreamSynchronize(stream), "CUDA arctangent initialization synchronization failed");
+            checkCuda(cudaGetLastError(), "CUDA 反正切初始化失败");
+            checkCuda(cudaStreamSynchronize(stream), "CUDA 反正切初始化同步失败");
             ++complete;
             updateProgress(complete, totalSteps, phase);
 
@@ -527,10 +583,10 @@ void PiEngine::runExact(unsigned digits) {
 
                 atanStepKernel<<<1, 1, 0, stream>>>(
                     term.data(), destination.data(), limbs, iteration, qSquared, (iteration % 2U) == 0U);
-                checkCuda(cudaGetLastError(), "CUDA arctangent step failed");
+                checkCuda(cudaGetLastError(), "CUDA 反正切迭代失败");
 
                 if ((iteration + 1U) % 8U == 0U || iteration + 2U == termCount) {
-                    checkCuda(cudaStreamSynchronize(stream), "CUDA arctangent synchronization failed");
+                    checkCuda(cudaStreamSynchronize(stream), "CUDA 反正切同步失败");
                 }
                 ++complete;
                 if ((iteration + 1U) % 4U == 0U || iteration + 2U == termCount) {
@@ -539,35 +595,35 @@ void PiEngine::runExact(unsigned digits) {
             }
         };
 
-        calculateAtan(5U, atanFifth, "Computing atan(1/5) on CUDA GPU");
-        calculateAtan(239U, atanTwoThirtyNine, "Computing atan(1/239) on CUDA GPU");
+        calculateAtan(5U, atanFifth, "正在 CUDA GPU 上计算 atan(1/5)");
+        calculateAtan(239U, atanTwoThirtyNine, "正在 CUDA GPU 上计算 atan(1/239)");
 
         waitWhilePaused();
         if (cancellationRequested()) {
             throw Cancelled();
         }
         machInQuarterKernel<<<1, 1, 0, stream>>>(atanFifth.data(), atanTwoThirtyNine.data(), quarterPi.data(), limbs);
-        checkCuda(cudaGetLastError(), "CUDA Machin combination failed");
-        checkCuda(cudaStreamSynchronize(stream), "CUDA Machin combination synchronization failed");
+        checkCuda(cudaGetLastError(), "CUDA Machin 公式合并失败");
+        checkCuda(cudaStreamSynchronize(stream), "CUDA Machin 公式合并同步失败");
         ++complete;
-        updateProgress(complete, totalSteps, "Combining Machin formula on CUDA GPU");
+        updateProgress(complete, totalSteps, "正在 CUDA GPU 上合并 Machin 公式");
 
         scalePiKernel<<<1, 1, 0, stream>>>(quarterPi.data(), limbs, integerPart.data());
-        checkCuda(cudaGetLastError(), "CUDA Pi scaling failed");
-        checkCuda(cudaStreamSynchronize(stream), "CUDA Pi scaling synchronization failed");
+        checkCuda(cudaGetLastError(), "CUDA 圆周率缩放失败");
+        checkCuda(cudaStreamSynchronize(stream), "CUDA 圆周率缩放同步失败");
         ++complete;
-        updateProgress(complete, totalSteps, "Formatting CUDA fixed-point result");
+        updateProgress(complete, totalSteps, "正在整理 CUDA 定点计算结果");
 
         std::vector<std::uint32_t> hostLimbs(limbs);
         unsigned hostInteger = 0;
         checkCuda(cudaMemcpyAsync(hostLimbs.data(), quarterPi.data(), limbs * sizeof(std::uint32_t), cudaMemcpyDeviceToHost, stream),
-                  "CUDA result copy failed");
+                  "CUDA 结果复制失败");
         checkCuda(cudaMemcpyAsync(&hostInteger, integerPart.data(), sizeof(hostInteger), cudaMemcpyDeviceToHost, stream),
-                  "CUDA integer result copy failed");
-        checkCuda(cudaEventRecord(finished, stream), "CUDA finish event recording failed");
-        checkCuda(cudaStreamSynchronize(stream), "CUDA final synchronization failed");
+                  "CUDA 整数部分复制失败");
+        checkCuda(cudaEventRecord(finished, stream), "CUDA 结束事件记录失败");
+        checkCuda(cudaStreamSynchronize(stream), "CUDA 最终同步失败");
         float elapsedMilliseconds = 0.0F;
-        checkCuda(cudaEventElapsedTime(&elapsedMilliseconds, started, finished), "CUDA elapsed time query failed");
+        checkCuda(cudaEventElapsedTime(&elapsedMilliseconds, started, finished), "CUDA 用时查询失败");
         ++complete;
 
         JobSnapshot result;
@@ -577,19 +633,19 @@ void PiEngine::runExact(unsigned digits) {
         result.completedSteps = complete;
         result.totalSteps = totalSteps;
         result.gpuMilliseconds = elapsedMilliseconds;
-        result.phase = "CUDA calculation complete";
-        result.message = "Result was calculated on the CUDA GPU. CPU fallback is disabled.";
+        result.phase = "CUDA 计算完成";
+        result.message = "结果已由当前 CUDA GPU 计算完成，程序没有 CPU 回退路径。";
         result.result = formatDigits(hostInteger, hostLimbs, digits);
         setSnapshot(result);
     } catch (const Cancelled&) {
         JobSnapshot cancelled = snapshot();
         cancelled.state = JobState::Cancelled;
-        cancelled.message = "CUDA calculation cancelled. No CPU fallback was used.";
+        cancelled.message = "CUDA 计算已取消，未使用 CPU 回退。";
         setSnapshot(cancelled);
     } catch (const std::exception& error) {
         JobSnapshot failed = snapshot();
         failed.state = JobState::Failed;
-        failed.message = std::string("CUDA calculation failed: ") + error.what() + ". CPU fallback is disabled.";
+        failed.message = std::string("CUDA 计算失败：") + error.what() + "。程序没有 CPU 回退路径。";
         setSnapshot(failed);
     }
 
@@ -604,26 +660,26 @@ void PiEngine::runExact(unsigned digits) {
     }
 }
 
-void PiEngine::runMonteCarlo(std::uint64_t samples) {
+void PiEngine::runMonteCarlo(std::uint64_t samples, int cudaDeviceIndex) {
     cudaStream_t stream = nullptr;
     cudaEvent_t started = nullptr;
     cudaEvent_t finished = nullptr;
 
     try {
-        checkCuda(cudaSetDevice(gpu_.deviceIndex), "CUDA device selection failed");
-        checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "CUDA stream creation failed");
-        checkCuda(cudaEventCreate(&started), "CUDA start event creation failed");
-        checkCuda(cudaEventCreate(&finished), "CUDA finish event creation failed");
+        checkCuda(cudaSetDevice(cudaDeviceIndex), "CUDA 设备选择失败");
+        checkCuda(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "CUDA 流创建失败");
+        checkCuda(cudaEventCreate(&started), "CUDA 起始事件创建失败");
+        checkCuda(cudaEventCreate(&finished), "CUDA 结束事件创建失败");
 
         cudaDeviceProp properties{};
-        checkCuda(cudaGetDeviceProperties(&properties, gpu_.deviceIndex), "CUDA device property query failed");
+        checkCuda(cudaGetDeviceProperties(&properties, cudaDeviceIndex), "CUDA 设备属性查询失败");
         const int requestedBlocks = std::max(1, properties.multiProcessorCount * 32);
         const int blocks = std::min(requestedBlocks, properties.maxGridSize[0]);
 
         DeviceBuffer<unsigned long long> hitsInsideCircle(1);
         DeviceBuffer<double> statistics(2);
-        checkCuda(cudaMemsetAsync(hitsInsideCircle.data(), 0, sizeof(unsigned long long), stream), "CUDA hit counter initialization failed");
-        checkCuda(cudaEventRecord(started, stream), "CUDA start event recording failed");
+        checkCuda(cudaMemsetAsync(hitsInsideCircle.data(), 0, sizeof(unsigned long long), stream), "CUDA 命中计数器初始化失败");
+        checkCuda(cudaEventRecord(started, stream), "CUDA 起始事件记录失败");
 
         const auto hostStarted = std::chrono::steady_clock::now();
         const unsigned long long seed = static_cast<unsigned long long>(hostStarted.time_since_epoch().count()) ^
@@ -644,17 +700,17 @@ void PiEngine::runMonteCarlo(std::uint64_t samples) {
                 static_cast<unsigned long long>(batchSamples),
                 seed,
                 hitsInsideCircle.data());
-            checkCuda(cudaGetLastError(), "CUDA Monte Carlo sampling kernel failed");
+            checkCuda(cudaGetLastError(), "CUDA 蒙特卡洛采样内核失败");
 
             const std::uint64_t nextCompleted = completed + batchSamples;
             monteCarloStatisticsKernel<<<1, 1, 0, stream>>>(
                 hitsInsideCircle.data(), static_cast<unsigned long long>(nextCompleted), statistics.data());
-            checkCuda(cudaGetLastError(), "CUDA Monte Carlo statistics kernel failed");
+            checkCuda(cudaGetLastError(), "CUDA 蒙特卡洛统计内核失败");
             checkCuda(cudaMemcpyAsync(&hostHits, hitsInsideCircle.data(), sizeof(hostHits), cudaMemcpyDeviceToHost, stream),
-                      "CUDA Monte Carlo hit count copy failed");
+                      "CUDA 蒙特卡洛命中数复制失败");
             checkCuda(cudaMemcpyAsync(hostStatistics, statistics.data(), sizeof(hostStatistics), cudaMemcpyDeviceToHost, stream),
-                      "CUDA Monte Carlo statistics copy failed");
-            checkCuda(cudaStreamSynchronize(stream), "CUDA Monte Carlo batch synchronization failed");
+                      "CUDA 蒙特卡洛统计结果复制失败");
+            checkCuda(cudaStreamSynchronize(stream), "CUDA 蒙特卡洛批次同步失败");
 
             completed = nextCompleted;
             const double elapsedSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - hostStarted).count();
@@ -662,10 +718,10 @@ void PiEngine::runMonteCarlo(std::uint64_t samples) {
             updateMonteCarloProgress(completed, samples, hostHits, hostStatistics[0], hostStatistics[1], throughput);
         }
 
-        checkCuda(cudaEventRecord(finished, stream), "CUDA finish event recording failed");
-        checkCuda(cudaStreamSynchronize(stream), "CUDA Monte Carlo final synchronization failed");
+        checkCuda(cudaEventRecord(finished, stream), "CUDA 结束事件记录失败");
+        checkCuda(cudaStreamSynchronize(stream), "CUDA 蒙特卡洛最终同步失败");
         float elapsedMilliseconds = 0.0F;
-        checkCuda(cudaEventElapsedTime(&elapsedMilliseconds, started, finished), "CUDA elapsed time query failed");
+        checkCuda(cudaEventElapsedTime(&elapsedMilliseconds, started, finished), "CUDA 用时查询失败");
 
         JobSnapshot result = snapshot();
         result.state = JobState::Finished;
@@ -673,8 +729,8 @@ void PiEngine::runMonteCarlo(std::uint64_t samples) {
         result.completedSteps = 1000;
         result.totalSteps = 1000;
         result.gpuMilliseconds = elapsedMilliseconds;
-        result.phase = "CUDA Monte Carlo calculation complete";
-        result.message = "Samples, estimate, and confidence interval were calculated on the CUDA GPU.";
+        result.phase = "CUDA 蒙特卡洛计算完成";
+        result.message = "样本、估计值和置信区间均由当前 CUDA GPU 计算完成。";
         result.result = formatMonteCarloResult(
             result.samplesCompleted,
             result.hitsInsideCircle,
@@ -685,12 +741,12 @@ void PiEngine::runMonteCarlo(std::uint64_t samples) {
     } catch (const Cancelled&) {
         JobSnapshot cancelled = snapshot();
         cancelled.state = JobState::Cancelled;
-        cancelled.message = "CUDA Monte Carlo calculation cancelled. No CPU fallback was used.";
+        cancelled.message = "CUDA 蒙特卡洛计算已取消，未使用 CPU 回退。";
         setSnapshot(cancelled);
     } catch (const std::exception& error) {
         JobSnapshot failed = snapshot();
         failed.state = JobState::Failed;
-        failed.message = std::string("CUDA Monte Carlo calculation failed: ") + error.what() + ". CPU fallback is disabled.";
+        failed.message = std::string("CUDA 蒙特卡洛计算失败：") + error.what() + "。程序没有 CPU 回退路径。";
         setSnapshot(failed);
     }
 

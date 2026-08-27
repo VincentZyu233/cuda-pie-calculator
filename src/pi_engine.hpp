@@ -8,11 +8,13 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace pie {
 
 inline constexpr unsigned kMinimumDigits = 10;
 inline constexpr unsigned kMaximumDigits = 10000;
+inline constexpr unsigned kDefaultDigits = 10000;
 inline constexpr std::uint64_t kMinimumMonteCarloSamples = 1'000'000ULL;
 inline constexpr std::uint64_t kMaximumMonteCarloSamples = 4'000'000'000ULL;
 
@@ -41,6 +43,10 @@ struct GpuInfo {
     std::uint64_t totalMemoryBytes = 0;
     int computeMajor = 0;
     int computeMinor = 0;
+    int multiprocessorCount = 0;
+    int coreClockKHz = 0;
+    int memoryClockKHz = 0;
+    int memoryBusWidthBits = 0;
     int driverVersion = 0;
     int runtimeVersion = 0;
 };
@@ -48,7 +54,7 @@ struct GpuInfo {
 struct JobSnapshot {
     JobState state = JobState::GpuUnavailable;
     CalculationMode mode = CalculationMode::ExactDigits;
-    unsigned requestedDigits = 1000;
+    unsigned requestedDigits = kDefaultDigits;
     unsigned completedSteps = 0;
     unsigned totalSteps = 0;
     double gpuMilliseconds = 0.0;
@@ -63,6 +69,11 @@ struct JobSnapshot {
     std::string result;
 };
 
+struct DeviceSnapshot {
+    GpuInfo gpu;
+    JobSnapshot job;
+};
+
 const char* stateLabel(JobState state);
 const char* modeLabel(CalculationMode mode);
 
@@ -74,7 +85,10 @@ public:
     PiEngine(const PiEngine&) = delete;
     PiEngine& operator=(const PiEngine&) = delete;
 
-    const GpuInfo& gpu() const noexcept;
+    std::vector<DeviceSnapshot> devices() const;
+    GpuInfo selectedGpu() const;
+    std::size_t selectedDeviceSlot() const;
+    bool selectDevice(std::size_t deviceSlot);
     JobSnapshot snapshot() const;
     bool startExact(unsigned digits);
     bool startMonteCarlo(std::uint64_t samples);
@@ -84,8 +98,8 @@ public:
 
 private:
     bool beginJob(const JobSnapshot& initial);
-    void runExact(unsigned digits);
-    void runMonteCarlo(std::uint64_t samples);
+    void runExact(unsigned digits, int cudaDeviceIndex);
+    void runMonteCarlo(std::uint64_t samples, int cudaDeviceIndex);
     void setSnapshot(const JobSnapshot& value);
     void updateProgress(unsigned complete, unsigned total, const std::string& phase);
     void updateMonteCarloProgress(
@@ -98,9 +112,10 @@ private:
     void waitWhilePaused();
     bool cancellationRequested() const noexcept;
 
-    GpuInfo gpu_;
     mutable std::mutex snapshotMutex_;
-    JobSnapshot snapshot_;
+    std::vector<GpuInfo> gpus_;
+    std::vector<JobSnapshot> deviceSnapshots_;
+    std::size_t selectedDeviceSlot_ = 0;
     std::thread worker_;
     std::atomic<bool> cancelRequested_{false};
     std::atomic<bool> paused_{false};
