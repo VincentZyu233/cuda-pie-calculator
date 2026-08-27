@@ -6,3 +6,5 @@ out/
 *.suo
 *.ncb
 *.log
+tui/target/
+dist/

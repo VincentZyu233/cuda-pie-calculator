@@ -1,0 +1,13 @@
+[package]
+name = "pie_tui"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cuda-pie-calculator"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+libloading = "0.8"
+unicode-width = "0.2"
