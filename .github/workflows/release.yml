@@ -33,10 +33,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install CUDA toolkit
-        uses: Jimver/cuda-toolkit@v0.2.21
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: 12.4.1
           method: network
+          log-file-suffix: ${{ matrix.name }}.txt
 
       - name: Configure and build on Linux
         if: runner.os == 'Linux'
