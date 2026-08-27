@@ -8,11 +8,9 @@ set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 
-# Build portable binaries for current NVIDIA desktop generations. Consumers need
-# an NVIDIA driver, but do not need a separately installed CUDA runtime.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89)
-endif()
+# Emit Maxwell-compatible code and PTX so current NVIDIA GPUs can JIT a native
+# image. Consumers still need an NVIDIA driver, but not a CUDA runtime install.
+set(CMAKE_CUDA_ARCHITECTURES "52" CACHE STRING "CUDA GPU architectures")
 
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
