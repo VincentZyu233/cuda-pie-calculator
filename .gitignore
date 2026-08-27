@@ -1,10 +1,15 @@
-build/
-out/
 .vs/
 .vscode/
+
 *.user
 *.suo
 *.ncb
 *.log
+
 tui/target/
 dist/
+build/
+out/
+
+temp/
+tmp/
