@@ -1,8 +1,6 @@
 # CUDA 圆周率计算器
 
-这是一个以 CUDA 为唯一数值后端的圆周率终端程序。它在一个全屏 TUI 中显示计算出的 `3.14...`，不会把全部结果直接刷到普通控制台；底部会持续显示任务状态、CPU 与内存采样，以及可用时的 NVIDIA GPU 利用率、显存和温度。
-
-程序**不会**使用 CPU 计算圆周率，也没有 CPU 回退路径。启动时会枚举全部 CUDA 设备，列出型号、计算能力、SM 数、显存与理论显存带宽；可选择其中一张卡单独计算，并保留每张卡最近一次任务的吞吐、耗时和结果摘要，便于对比。没有 NVIDIA GPU、驱动不可用、GPU 没有透传到虚拟机，或 CUDA 初始化失败时，界面会明确显示“GPU 不可用”和具体驱动错误，开始计算操作会保持禁用状态。
+<img width="100%" height="100%" alt="114514" src="https://github.com/user-attachments/assets/aebd78a0-9036-4fda-88c0-61baf19fb4a0" />
 
 ## 支持范围
 
@@ -10,8 +8,6 @@
 - Ubuntu 22.04+ x64
 - Debian 12+ x64
 - NVIDIA CUDA GPU 与对应驱动
-
-不构建或发布 ARM 版本。Linux 发布包由 Ubuntu 22.04 x64 构建，面向 Ubuntu 22.04+ 与 Debian 12+；Windows 发布包为 x64 ZIP。
 
 ## 计算模式
 
