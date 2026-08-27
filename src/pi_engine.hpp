@@ -13,6 +13,13 @@ namespace pie {
 
 inline constexpr unsigned kMinimumDigits = 10;
 inline constexpr unsigned kMaximumDigits = 10000;
+inline constexpr std::uint64_t kMinimumMonteCarloSamples = 1'000'000ULL;
+inline constexpr std::uint64_t kMaximumMonteCarloSamples = 4'000'000'000ULL;
+
+enum class CalculationMode {
+    ExactDigits,
+    MonteCarlo,
+};
 
 enum class JobState {
     GpuUnavailable,
@@ -40,16 +47,24 @@ struct GpuInfo {
 
 struct JobSnapshot {
     JobState state = JobState::GpuUnavailable;
+    CalculationMode mode = CalculationMode::ExactDigits;
     unsigned requestedDigits = 1000;
     unsigned completedSteps = 0;
     unsigned totalSteps = 0;
     double gpuMilliseconds = 0.0;
+    std::uint64_t sampleTarget = 0;
+    std::uint64_t samplesCompleted = 0;
+    std::uint64_t hitsInsideCircle = 0;
+    double monteCarloEstimate = 0.0;
+    double monteCarloConfidence95 = 0.0;
+    double samplesPerSecond = 0.0;
     std::string phase;
     std::string message;
     std::string result;
 };
 
 const char* stateLabel(JobState state);
+const char* modeLabel(CalculationMode mode);
 
 class PiEngine {
 public:
@@ -61,15 +76,25 @@ public:
 
     const GpuInfo& gpu() const noexcept;
     JobSnapshot snapshot() const;
-    bool start(unsigned digits);
+    bool startExact(unsigned digits);
+    bool startMonteCarlo(std::uint64_t samples);
     void togglePause();
     void cancel();
     void stop();
 
 private:
-    void run(unsigned digits);
+    bool beginJob(const JobSnapshot& initial);
+    void runExact(unsigned digits);
+    void runMonteCarlo(std::uint64_t samples);
     void setSnapshot(const JobSnapshot& value);
     void updateProgress(unsigned complete, unsigned total, const std::string& phase);
+    void updateMonteCarloProgress(
+        std::uint64_t completed,
+        std::uint64_t target,
+        std::uint64_t hits,
+        double estimate,
+        double confidence95,
+        double samplesPerSecond);
     void waitWhilePaused();
     bool cancellationRequested() const noexcept;
 

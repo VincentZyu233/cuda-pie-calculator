@@ -34,6 +34,7 @@ enum class Key {
     Pause,
     Cancel,
     Quit,
+    ToggleMode,
     IncreasePrecision,
     DecreasePrecision,
     ScrollUp,
@@ -168,6 +169,7 @@ private:
             case 's': case 'S': return Key::Start;
             case 'p': case 'P': return Key::Pause;
             case 'c': case 'C': return Key::Cancel;
+            case 'm': case 'M': return Key::ToggleMode;
             case 'q': case 'Q': return Key::Quit;
             case '+': case '=': return Key::IncreasePrecision;
             case '-': case '_': return Key::DecreasePrecision;
@@ -222,14 +224,47 @@ std::string progressBar(unsigned completed, unsigned total, std::size_t availabl
     return output.str();
 }
 
-std::vector<std::string> resultLines(const std::string& digits, std::size_t width) {
+bool jobIsActive(JobState state) {
+    return state == JobState::Preparing || state == JobState::Running || state == JobState::Paused || state == JobState::Cancelling;
+}
+
+std::string formatSampleCount(std::uint64_t samples) {
+    std::ostringstream output;
+    if (samples >= 1'000'000'000ULL) {
+        output << std::fixed << std::setprecision(2) << static_cast<double>(samples) / 1'000'000'000.0 << " B";
+    } else if (samples >= 1'000'000ULL) {
+        output << std::fixed << std::setprecision(1) << static_cast<double>(samples) / 1'000'000.0 << " M";
+    } else {
+        output << samples;
+    }
+    return output.str();
+}
+
+std::vector<std::string> resultLines(const std::string& result, std::size_t width, CalculationMode selectedMode) {
     std::vector<std::string> lines;
-    if (digits.empty()) {
-        lines.emplace_back("Waiting for a CUDA result. No CPU calculation path exists.");
+    if (result.empty()) {
+        lines.emplace_back(selectedMode == CalculationMode::MonteCarlo
+                               ? "Waiting for CUDA Monte Carlo samples. No CPU calculation path exists."
+                               : "Waiting for a CUDA exact result. No CPU calculation path exists.");
         return lines;
     }
-    for (std::size_t offset = 0; offset < digits.size(); offset += width) {
-        lines.push_back(digits.substr(offset, width));
+
+    std::size_t segmentStart = 0;
+    while (segmentStart <= result.size()) {
+        const std::size_t lineBreak = result.find('\n', segmentStart);
+        const std::size_t segmentEnd = lineBreak == std::string::npos ? result.size() : lineBreak;
+        const std::string segment = result.substr(segmentStart, segmentEnd - segmentStart);
+        if (segment.empty()) {
+            lines.emplace_back();
+        } else {
+            for (std::size_t offset = 0; offset < segment.size(); offset += width) {
+                lines.push_back(segment.substr(offset, width));
+            }
+        }
+        if (lineBreak == std::string::npos) {
+            break;
+        }
+        segmentStart = lineBreak + 1;
     }
     return lines;
 }
@@ -262,12 +297,14 @@ void render(
     const GpuInfo& gpu,
     const JobSnapshot& job,
     const ResourceStats& resources,
+    CalculationMode selectedMode,
     unsigned selectedDigits,
+    std::uint64_t selectedSamples,
     std::size_t& scrollOffset) {
     const std::size_t width = terminal.columns;
     const std::size_t bottomRows = 5;
     const std::size_t middleRows = std::max<std::size_t>(1, terminal.rows - bottomRows - 4);
-    const auto lines = resultLines(job.result, width - 2);
+    const auto lines = resultLines(job.result, width - 2, selectedMode);
     const std::size_t maxScroll = lines.size() > middleRows ? lines.size() - middleRows : 0;
     scrollOffset = std::min(scrollOffset, maxScroll);
 
@@ -285,21 +322,32 @@ void render(
     }
 
     std::ostringstream status;
-    status << "State: " << stateLabel(job.state) << "   Precision: " << selectedDigits << " digits   "
-           << progressBar(job.completedSteps, job.totalSteps, width / 3);
+    status << "State: " << stateLabel(job.state) << "   Mode: " << modeLabel(selectedMode) << "   ";
+    if (selectedMode == CalculationMode::MonteCarlo) {
+        status << "Target: " << formatSampleCount(selectedSamples) << " samples   ";
+    } else {
+        status << "Precision: " << selectedDigits << " digits   ";
+    }
+    status << progressBar(job.completedSteps, job.totalSteps, width / 3);
     appendLine(output, status.str(), width);
-    appendLine(output, "Pi output", width);
+    const CalculationMode outputMode = job.result.empty() ? selectedMode : job.mode;
+    appendLine(output, outputMode == CalculationMode::MonteCarlo ? "Monte Carlo output" : "Exact Pi output", width);
 
     for (std::size_t row = 0; row < middleRows; ++row) {
         const std::size_t line = scrollOffset + row;
         appendLine(output, line < lines.size() ? " " + lines[line] : "", width);
     }
 
-    appendLine(output, job.phase.empty() ? job.message : job.phase, width);
+    std::string phase = job.phase.empty() ? job.message : job.phase;
+    if (job.mode == CalculationMode::MonteCarlo && job.samplesCompleted > 0) {
+        phase += "   Samples: " + formatSampleCount(job.samplesCompleted) + " / " + formatSampleCount(job.sampleTarget) +
+                 "   Hits: " + std::to_string(job.hitsInsideCircle);
+    }
+    appendLine(output, phase, width);
     appendLine(output, cpuLine(resources), width);
     appendLine(output, gpuLoadLine(resources), width);
     if (gpu.available) {
-        appendLine(output, "[s] start  [p] pause/resume  [c] cancel  [+/-] digits  [j/k or arrows] scroll  [q] quit", width);
+        appendLine(output, "[s] start  [m] mode  [p] pause/resume  [c] cancel  [+/-] target  [j/k or arrows] scroll  [q] quit", width);
     } else {
         appendLine(output, "[s] disabled: no CUDA GPU   [q] quit", width);
     }
@@ -319,7 +367,9 @@ void render(
 int TerminalUi::run(PiEngine& engine) {
     TerminalSession terminal;
     ResourceMonitor monitor(engine.gpu());
+    CalculationMode selectedMode = CalculationMode::ExactDigits;
     unsigned selectedDigits = 1000;
+    std::uint64_t selectedSamples = 100'000'000ULL;
     std::size_t scrollOffset = 0;
     bool running = true;
 
@@ -327,9 +377,21 @@ int TerminalUi::run(PiEngine& engine) {
         const Key key = terminal.pollKey();
         switch (key) {
             case Key::Start:
-                engine.start(selectedDigits);
+                if (selectedMode == CalculationMode::MonteCarlo) {
+                    engine.startMonteCarlo(selectedSamples);
+                } else {
+                    engine.startExact(selectedDigits);
+                }
                 scrollOffset = 0;
                 break;
+            case Key::ToggleMode: {
+                const JobState state = engine.snapshot().state;
+                if (!jobIsActive(state)) {
+                    selectedMode = selectedMode == CalculationMode::ExactDigits ? CalculationMode::MonteCarlo : CalculationMode::ExactDigits;
+                    scrollOffset = 0;
+                }
+                break;
+            }
             case Key::Pause:
                 engine.togglePause();
                 break;
@@ -337,10 +399,26 @@ int TerminalUi::run(PiEngine& engine) {
                 engine.cancel();
                 break;
             case Key::IncreasePrecision:
-                selectedDigits = std::min(kMaximumDigits, selectedDigits + 100U);
+                if (jobIsActive(engine.snapshot().state)) {
+                    break;
+                }
+                if (selectedMode == CalculationMode::MonteCarlo) {
+                    selectedSamples = std::min<std::uint64_t>(kMaximumMonteCarloSamples, selectedSamples + 10'000'000ULL);
+                } else {
+                    selectedDigits = std::min(kMaximumDigits, selectedDigits + 100U);
+                }
                 break;
             case Key::DecreasePrecision:
-                selectedDigits = std::max(kMinimumDigits, selectedDigits > 100U ? selectedDigits - 100U : kMinimumDigits);
+                if (jobIsActive(engine.snapshot().state)) {
+                    break;
+                }
+                if (selectedMode == CalculationMode::MonteCarlo) {
+                    selectedSamples = selectedSamples > kMinimumMonteCarloSamples + 10'000'000ULL
+                                          ? selectedSamples - 10'000'000ULL
+                                          : kMinimumMonteCarloSamples;
+                } else {
+                    selectedDigits = std::max(kMinimumDigits, selectedDigits > 100U ? selectedDigits - 100U : kMinimumDigits);
+                }
                 break;
             case Key::ScrollUp:
                 scrollOffset = scrollOffset == 0 ? 0 : scrollOffset - 1;
@@ -356,7 +434,7 @@ int TerminalUi::run(PiEngine& engine) {
                 break;
         }
 
-        render(terminal.size(), engine.gpu(), engine.snapshot(), monitor.sample(), selectedDigits, scrollOffset);
+        render(terminal.size(), engine.gpu(), engine.snapshot(), monitor.sample(), selectedMode, selectedDigits, selectedSamples, scrollOffset);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     return 0;
