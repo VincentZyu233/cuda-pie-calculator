@@ -200,13 +200,16 @@ std::string crop(std::string value, std::size_t width) {
     return value + "...";
 }
 
-void appendLine(std::ostringstream& output, const std::string& text, std::size_t width) {
+void appendLine(std::ostringstream& output, const std::string& text, std::size_t width, bool advance = true) {
     const std::string visible = crop(text, width);
     output << visible;
     if (visible.size() < width) {
         output << std::string(width - visible.size(), ' ');
     }
-    output << "\x1b[K\r\n";
+    output << "\x1b[K";
+    if (advance) {
+        output << "\r\n";
+    }
 }
 
 std::string progressBar(unsigned completed, unsigned total, std::size_t availableWidth) {
@@ -303,9 +306,9 @@ void render(
     if (job.gpuMilliseconds > 0.0) {
         std::ostringstream timing;
         timing << "CUDA kernel time: " << std::fixed << std::setprecision(2) << job.gpuMilliseconds << " ms  " << job.message;
-        appendLine(output, timing.str(), width);
+        appendLine(output, timing.str(), width, false);
     } else {
-        appendLine(output, job.message, width);
+        appendLine(output, job.message, width, false);
     }
 
     std::cout << output.str() << std::flush;
