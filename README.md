@@ -11,7 +11,7 @@
 
 ## 计算模式
 
-程序提供两个 CUDA 计算模式，可用 `m` 在未运行时切换。
+程序提供两个 CUDA 计算模式，可用 `e` / `m` 在未运行时切换。
 
 ### 精确位数
 
@@ -41,20 +41,23 @@ pi / 4 = 4 * atan(1 / 5) - atan(1 / 239)
 
 Windows 可在 PowerShell 或 Windows Terminal 中运行 `cuda-pie-calculator.exe`。程序需要交互式终端；Windows 10/11 会启用 Virtual Terminal 模式来显示 TUI。
 
+界面为 btop 风格的实时仪表盘：左侧展示设备、GPU 信息与系统资源，右侧展示计算进度、实时图与可滚动结果，底部为快捷键提示。
+
 按键：
 
-- `s`：开始 CUDA 计算
-- `m`：在精确位数与蒙特卡洛模式间切换（任务未运行时）
-- `[` / `]`：切换当前 CUDA 设备（任务未运行时）
-- `p`：暂停或继续
+- `Space`：开始 / 暂停 / 继续 CUDA 计算
 - `c`：取消当前 CUDA 任务
+- `Tab` / `Shift+Tab`：切换当前 CUDA 设备（任务未运行时）
+- `e`：选择精确位数模式
+- `m`：选择蒙特卡洛模式（任务未运行时）
 - `+` / `-`：精确模式以 100 位调整精度；蒙特卡洛模式以 1,000 万样本调整目标
-- `j` / `k` 或上下方向键：滚动结果区域
+- `j` / `k` 或 `PageUp` / `PageDown`：滚动结果区域
+- `h` / `?`：显示或隐藏帮助
 - `q`：退出
 
 ## 本地构建
 
-需要 CMake 3.24+、支持 C++20 的编译器和 CUDA Toolkit 12.x。构建时可按实际 GPU 调整 `CMAKE_CUDA_ARCHITECTURES`。
+需要 CMake 3.24+、支持 C++20 的编译器、CUDA Toolkit 12.x 与网络连接（首次构建会通过 FetchContent 拉取 FTXUI v7）。也可以直接使用 GitHub Actions 生成的 Artifact，无需本地安装 CUDA。构建时可按实际 GPU 调整 `CMAKE_CUDA_ARCHITECTURES`。
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -65,7 +68,7 @@ cmake --build build --parallel
 
 ## 自动发布
 
-推送到 `main` 或 `master` 会触发 GitHub Actions：
+当 commit message 包含 `[build-release]` 或 `[build-action]`（连字符可省略）时，推送到 `main` 或 `master` 会触发 `.github/workflows/build-release.yml`：
 
 1. 在 CUDA Toolkit 环境中分别构建 Linux x64 与 Windows x64 二进制。
 2. 上传 `cuda-pie-calculator-linux-amd64.tar.gz` 与 `cuda-pie-calculator-windows-amd64.zip`。

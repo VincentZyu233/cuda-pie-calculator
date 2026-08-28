@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - master
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -27,6 +28,14 @@ jobs:
           - name: windows-amd64
             runner: windows-2022
             archive: cuda-pie-calculator-windows-amd64.zip
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, 'build-release') ||
+      contains(github.event.head_commit.message, 'buildrelease') ||
+      contains(github.event.head_commit.message, 'build release') ||
+      contains(github.event.head_commit.message, 'build-action') ||
+      contains(github.event.head_commit.message, 'buildaction') ||
+      contains(github.event.head_commit.message, 'build action')
 
     steps:
       - name: Check out source

@@ -15,6 +15,13 @@ set(CMAKE_CUDA_ARCHITECTURES "52" CACHE STRING "CUDA GPU architectures")
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
 
+include(FetchContent)
+FetchContent_Declare(ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui
+    GIT_TAG v7.0.3
+)
+FetchContent_MakeAvailable(ftxui)
+
 add_executable(cuda-pie-calculator
     src/main.cpp
     src/pi_engine.cu
@@ -23,11 +30,12 @@ add_executable(cuda-pie-calculator
 )
 
 target_include_directories(cuda-pie-calculator PRIVATE src)
-target_link_libraries(cuda-pie-calculator PRIVATE CUDA::cudart_static Threads::Threads ${CMAKE_DL_LIBS})
+target_link_libraries(cuda-pie-calculator PRIVATE CUDA::cudart_static Threads::Threads ${CMAKE_DL_LIBS} ftxui::ftxui)
 
 target_compile_definitions(cuda-pie-calculator PRIVATE $<$<CONFIG:Debug>:PIE_DEBUG_BUILD=1>)
 
 if(MSVC)
+    target_compile_definitions(cuda-pie-calculator PRIVATE NOMINMAX)
     target_compile_options(cuda-pie-calculator PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
 else()
     target_compile_options(cuda-pie-calculator PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>)

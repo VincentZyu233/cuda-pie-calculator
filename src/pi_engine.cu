@@ -344,7 +344,7 @@ PiEngine::PiEngine() : gpus_(probeGpus()) {
     for (const GpuInfo& gpu : gpus_) {
         JobSnapshot snapshot;
         snapshot.state = gpu.available ? JobState::Idle : JobState::GpuUnavailable;
-        snapshot.message = gpu.available ? "CUDA 设备已就绪，按 s 开始计算。" : gpu.reason;
+        snapshot.message = gpu.available ? "CUDA 设备已就绪，按空格键开始计算。" : gpu.reason;
         deviceSnapshots_.push_back(std::move(snapshot));
     }
 }
