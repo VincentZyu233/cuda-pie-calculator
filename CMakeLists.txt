@@ -29,14 +29,16 @@ add_executable(cuda-pie-calculator
     src/tui.cpp
 )
 
-target_include_directories(cuda-pie-calculator PRIVATE src)
-target_link_libraries(cuda-pie-calculator PRIVATE CUDA::cudart_static Threads::Threads ${CMAKE_DL_LIBS} ftxui::ftxui)
+target_include_directories(cuda-pie-calculator PRIVATE src ${ftxui_SOURCE_DIR}/include)
+# Use LINK_ONLY so FTXUI PUBLIC /utf-8 (set by its CMakeLists) does not leak
+# into nvcc. We re-add /utf-8 only for C++ below.
+target_link_libraries(cuda-pie-calculator PRIVATE CUDA::cudart_static Threads::Threads ${CMAKE_DL_LIBS} $<LINK_ONLY:ftxui::ftxui>)
 
 target_compile_definitions(cuda-pie-calculator PRIVATE $<$<CONFIG:Debug>:PIE_DEBUG_BUILD=1>)
 
 if(MSVC)
     target_compile_definitions(cuda-pie-calculator PRIVATE NOMINMAX)
-    target_compile_options(cuda-pie-calculator PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4>)
+    target_compile_options(cuda-pie-calculator PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/W4> $<$<COMPILE_LANGUAGE:CXX>:/utf-8>)
 else()
     target_compile_options(cuda-pie-calculator PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic>)
 endif()

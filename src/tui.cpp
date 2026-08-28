@@ -21,6 +21,8 @@
 #include <utility>
 #include <vector>
 
+using namespace ftxui;
+
 namespace pie {
 namespace {
 
